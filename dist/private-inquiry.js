@@ -34,45 +34,52 @@ export class PrivateInquirySetupError extends Error {
         this.name = "PrivateInquirySetupError";
     }
 }
-/** Whether the ancestor prefix ending at this persisted entry has no open tool batch. */
-export function isReplayableEntry(entries, entry) {
-    return latestReplayableAnchor(entries, entry.id) === entry.id;
+function answeredToolCallIds(entries) {
+    const answered = new Set();
+    for (const entry of entries) {
+        const message = entry.message;
+        if (message?.role !== "toolResult")
+            continue;
+        // Pi persists a tool result as one message carrying its toolCallId.
+        if (typeof message.toolCallId === "string")
+            answered.add(message.toolCallId);
+        for (const block of message.content ?? []) {
+            if (typeof block.toolCallId === "string")
+                answered.add(block.toolCallId);
+        }
+    }
+    return answered;
 }
 /**
- * Latest closed prefix on the selected ancestry. Later or off-branch replies
- * cannot close a batch, and trailing metadata cannot hide outstanding calls.
+ * Whether a persisted entry is a safe fork anchor. An assistant entry whose
+ * tool batch is not fully answered is an open batch: not replayable.
+ */
+export function isReplayableEntry(entries, entry) {
+    if (entry.message?.role !== "assistant")
+        return true;
+    if (entry.message.stopReason !== "toolUse")
+        return true;
+    const calls = (entry.message.content ?? [])
+        .filter((block) => block.type === "toolCall" && typeof block.id === "string")
+        .map((block) => block.id);
+    if (calls.length === 0)
+        return true;
+    const answered = answeredToolCallIds(entries);
+    return calls.every((id) => answered.has(id));
+}
+/**
+ * Latest replayable persisted entry, walking back from `leafId` past an open
+ * tool batch. Returns undefined when no persisted entry is replayable.
  */
 export function latestReplayableAnchor(entries, leafId) {
     const byId = new Map(entries.map((entry) => [entry.id, entry]));
-    const branch = [];
     let current = leafId ? byId.get(leafId) : undefined;
     while (current) {
-        branch.push(current);
+        if (isReplayableEntry(entries, current))
+            return current.id;
         current = current.parentId ? byId.get(current.parentId) : undefined;
     }
-    const pending = new Set();
-    let anchor;
-    for (const entry of branch.reverse()) {
-        const message = entry.message;
-        if (message?.role === "assistant" && message.stopReason === "toolUse") {
-            for (const block of message.content ?? []) {
-                if (block.type === "toolCall" && typeof block.id === "string")
-                    pending.add(block.id);
-            }
-        }
-        else if (message?.role === "toolResult") {
-            // Pi persists the call id on the message; older shapes used content blocks.
-            if (typeof message.toolCallId === "string")
-                pending.delete(message.toolCallId);
-            for (const block of message.content ?? []) {
-                if (typeof block.toolCallId === "string")
-                    pending.delete(block.toolCallId);
-            }
-        }
-        if (pending.size === 0)
-            anchor = entry.id;
-    }
-    return anchor;
+    return undefined;
 }
 /**
  * Capture the fork anchor at trigger time: the latest replayable entry, or

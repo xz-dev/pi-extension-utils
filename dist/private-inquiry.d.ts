@@ -46,11 +46,14 @@ export interface PrivateInquiryParentSession {
     getLeafId(): string | null;
     getEntries(): readonly unknown[];
 }
-/** Whether the ancestor prefix ending at this persisted entry has no open tool batch. */
+/**
+ * Whether a persisted entry is a safe fork anchor. An assistant entry whose
+ * tool batch is not fully answered is an open batch: not replayable.
+ */
 export declare function isReplayableEntry(entries: readonly ReplayableEntry[], entry: ReplayableEntry): boolean;
 /**
- * Latest closed prefix on the selected ancestry. Later or off-branch replies
- * cannot close a batch, and trailing metadata cannot hide outstanding calls.
+ * Latest replayable persisted entry, walking back from `leafId` past an open
+ * tool batch. Returns undefined when no persisted entry is replayable.
  */
 export declare function latestReplayableAnchor(entries: readonly ReplayableEntry[], leafId: string | null): string | undefined;
 /**
