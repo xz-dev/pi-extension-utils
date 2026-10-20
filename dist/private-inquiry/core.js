@@ -36,7 +36,7 @@ export const RESULT_DIR_PREFIX = join(process.platform === "win32" ? tmpdir() : 
  * The fixed re-ask budget: consumed invalid responses per inquiry round.
  * Consumers may override per operation via `invalidAttemptLimit`.
  */
-export const INVALID_ATTEMPT_LIMIT = 3;
+export const INVALID_ATTEMPT_LIMIT = 4;
 function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);
 }

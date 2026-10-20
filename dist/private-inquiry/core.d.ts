@@ -43,7 +43,7 @@ export interface ResultFileNaming {
  * The fixed re-ask budget: consumed invalid responses per inquiry round.
  * Consumers may override per operation via `invalidAttemptLimit`.
  */
-export declare const INVALID_ATTEMPT_LIMIT = 3;
+export declare const INVALID_ATTEMPT_LIMIT = 4;
 /** Consumer-supplied payload validation result (design D3). */
 export type PayloadValidation<T> = {
     readonly valid: true;
