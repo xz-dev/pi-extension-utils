@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { access, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { access, lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +20,10 @@ async function locateDependency(start) {
 	}
 }
 const dependency = await locateDependency(root);
-assert.equal(await realpath(dependency), dependency, "Refusing to patch a shared or linked runtime.");
+// Neither the package nor its node_modules may be a link (or junction). A
+// whole-path realpath comparison would also reject Windows 8.3 short names.
+for (const path of [dependency, dirname(dependency)])
+	assert.equal((await lstat(path)).isSymbolicLink(), false, "Refusing to patch a shared or linked runtime.");
 const manifest = JSON.parse(await readFile(join(patch, "manifest.json"), "utf8"));
 const packagePath = join(dependency, "package.json");
 const metadata = JSON.parse(await readFile(packagePath, "utf8"));

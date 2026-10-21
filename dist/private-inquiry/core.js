@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 /**
@@ -82,6 +82,45 @@ function assistantTerminalOutcome(child, startIndex) {
     return { kind: "none" };
 }
 /**
+ * Open the designated result file without following a final-component link
+ * and pin the descriptor to the regular file the path named. POSIX adds
+ * O_NOFOLLOW; Windows has no such flag, so on every platform the opened
+ * descriptor must also match the link-free lstat identity (dev/ino). A
+ * missing file is created only with O_CREAT|O_EXCL, which never follows a
+ * link and fails if anything appeared in its place.
+ */
+async function openResultFile(path, flags, mode) {
+    let before;
+    try {
+        before = await lstat(path, { bigint: true });
+    }
+    catch (error) {
+        if ((flags & constants.O_CREAT) === 0 ||
+            error.code !== "ENOENT")
+            throw error;
+    }
+    if (before !== undefined && !before.isFile())
+        throw new Error("decision result path is not the designated regular file.");
+    const handle = await open(path, flags |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0) |
+        (before === undefined ? constants.O_EXCL : 0), mode);
+    try {
+        const after = await handle.stat({ bigint: true });
+        if (!after.isFile() ||
+            (before !== undefined &&
+                (after.ino === 0n ||
+                    after.dev !== before.dev ||
+                    after.ino !== before.ino)))
+            throw new Error("decision result path is not the designated regular file.");
+        return handle;
+    }
+    catch (error) {
+        await handle.close().catch(() => { });
+        throw error;
+    }
+}
+/**
  * Evaluate the designated result file after a normally settled response.
  * Malformed JSON, non-object JSON, and validator-rejected payloads are
  * model-format errors. Symlink/non-regular targets and filesystem read
@@ -95,14 +134,8 @@ async function readResultFile(resultFile, validate) {
     // failure, not a model-format retry.
     let raw;
     try {
-        const handle = await open(resultFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        const handle = await openResultFile(resultFile, constants.O_RDONLY);
         try {
-            if (!(await handle.stat()).isFile()) {
-                return {
-                    kind: "execution-error",
-                    error: "decision result path is not the designated regular file.",
-                };
-            }
             raw = await handle.readFile("utf8");
         }
         finally {
@@ -130,21 +163,13 @@ async function readResultFile(resultFile, validate) {
         ? { kind: "valid", decision: validation.value }
         : { kind: "invalid", error: validation.error };
 }
-/** Append the actual result-file marker to host callback text. */
-/**
- * Non-undefined on platforms where the private-inquiry guard does not hold
- * (POSIX O_NOFOLLOW and exact path identity); every operation fails closed.
- * Tests may override the detected platform via PIU_PRIVATE_INQUIRY_PLATFORM.
- */
-const UNSUPPORTED_PLATFORM_ERROR = (process.env.PIU_PRIVATE_INQUIRY_PLATFORM ?? process.platform) === "win32"
-    ? "pi-extension-utils/private-inquiry is supported on Linux and macOS only."
-    : undefined;
 /** Observer copy of a flat candidate; primitives are already immutable. */
 function shallowCopy(value) {
     if (typeof value !== "object" || value === null)
         return value;
     return (Array.isArray(value) ? [...value] : { ...value });
 }
+/** Append the actual result-file marker to host callback text. */
 function withResultMarker(text, resultFile, tag) {
     return `${text}\n\n<${tag}>${JSON.stringify(resultFile)}</${tag}>`;
 }
@@ -153,11 +178,6 @@ function withResultMarker(text, resultFile, tag) {
  * full contract.
  */
 export async function runPrivateDecision(options) {
-    // Fail closed where the no-follow result-file guard and exact path
-    // identity do not hold: never fork or accept a result there.
-    if (UNSUPPORTED_PLATFORM_ERROR !== undefined) {
-        return { kind: "execution-error", error: UNSUPPORTED_PLATFORM_ERROR };
-    }
     const { signal } = options;
     const cancelled = () => signal?.aborted === true || !options.isCurrent();
     const attemptLimit = options.invalidAttemptLimit ?? INVALID_ATTEMPT_LIMIT;
@@ -211,14 +231,8 @@ export async function runPrivateDecision(options) {
         // filesystem failure, not a format retry: it is reported, never
         // repaired or deleted here.
         try {
-            const handle = await open(resultFile, constants.O_WRONLY |
-                constants.O_CREAT |
-                constants.O_NOFOLLOW |
-                constants.O_NONBLOCK, 0o600);
+            const handle = await openResultFile(resultFile, constants.O_WRONLY | constants.O_CREAT, 0o600);
             try {
-                if (!(await handle.stat()).isFile()) {
-                    return "result file initialization: not a regular file";
-                }
                 await handle.truncate(0);
                 await handle.writeFile("{}", "utf8");
             }

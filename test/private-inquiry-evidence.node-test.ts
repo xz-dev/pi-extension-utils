@@ -8,10 +8,7 @@ import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import nodeTest, { type TestContext } from "node:test";
-
-// The private-inquiry entry is POSIX-only (see README "Private inquiry").
-const test = (process.platform === "win32" ? nodeTest.skip : nodeTest) as typeof nodeTest;
+import test, { type TestContext } from "node:test";
 
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -61,7 +58,9 @@ async function harness(t: TestContext, script: (request: number, resultFile: str
 		streamSimple: (model, context, options) => {
 			const messages = context.messages as Array<{ role: string; content?: unknown }>;
 			const serialized = JSON.stringify(messages);
-			resultFile = serialized.match(/<private_inquiry_result_file>\\"([^\\]+)\\"/)?.[1] ?? resultFile;
+			// The marker holds a JSON string inside serialized JSON; Windows paths contain backslashes.
+			const marker = serialized.match(/<private_inquiry_result_file>(.*?)<\/private_inquiry_result_file>/)?.[1];
+			resultFile = marker === undefined ? resultFile : JSON.parse(JSON.parse(`"${marker}"`));
 			const toolResults = messages
 				.filter((message) => message.role === "toolResult")
 				.map((message) => JSON.stringify(message.content));
@@ -183,6 +182,25 @@ test("duplicate evidence calls in one response are rejected", { timeout: 60_000 
 	assert.equal(h.requests[1]!.toolResults.length, 0, "nothing executed");
 });
 
+test("the child's result write never follows a link that replaced the result file", { timeout: 60_000 }, async (t) => {
+	const fs = await import("node:fs");
+	let target = "";
+	const h = await harness(t, (n, file) => {
+		if (n === 1) {
+			// Outside the owned temp dir, which cleanup removes.
+			target = join(h.cwd, "outside.txt");
+			fs.writeFileSync(target, "untouched");
+			fs.rmSync(file);
+			fs.symlinkSync(target, file);
+		}
+		return write(file, "redirected");
+	});
+	const result = await inquire(h, undefined);
+	assert.equal(result.kind, "execution-error", JSON.stringify(result));
+	assert.equal(fs.readFileSync(target, "utf8"), "untouched");
+	assert.equal(h.requests.length, 1, "no retry after a host file failure");
+});
+
 test("abort during a provider stream settles cancelled promptly", { timeout: 60_000 }, async (t) => {
 	const h = await harness(t, () => ({ hang: true }));
 	const controller = new AbortController();
@@ -198,7 +216,8 @@ test("abort during a provider stream settles cancelled promptly", { timeout: 60_
 	assert.equal(h.requests.length, 1, "no further provider call after abort");
 });
 
-test("abort during a slow grep subprocess kills it and settles promptly", { timeout: 60_000 }, async (t) => {
+// The shadow rg is a POSIX shell script, which Windows cannot execute.
+test("abort during a slow grep subprocess kills it and settles promptly", { timeout: 60_000, skip: process.platform === "win32" }, async (t) => {
 	// Shadow ripgrep with a slow script inside an isolated agent bin dir.
 	const agentDir = await mkdtemp(join(TEST_TMP, "piu-evidence-agent-"));
 	t.after(() => rm(agentDir, { recursive: true, force: true }));

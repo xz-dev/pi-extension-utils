@@ -15,11 +15,7 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import nodeTest, { type TestContext } from "node:test";
-
-// The private-inquiry entry is POSIX-only: its result-file guard relies on
-// O_NOFOLLOW and exact path identity, which Windows does not provide.
-const test = (process.platform === "win32" ? nodeTest.skip : nodeTest) as typeof nodeTest;
+import test, { type TestContext } from "node:test";
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {

@@ -10,11 +10,6 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-if (process.platform === "win32") {
-	// The private-inquiry entry is POSIX-only (see README "Private inquiry").
-	console.log(JSON.stringify({ ok: true, skipped: "private-inquiry is POSIX-only" }));
-	process.exit(0);
-}
 const repoRoot = resolve(import.meta.dirname, "..");
 const manifest = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
 // npm is npm.cmd on Windows, which execFile cannot start; run npm's own CLI script via node.
@@ -81,7 +76,9 @@ models.registerProvider("piu-test", {
   streamSimple: (model, context) => {
     requests++;
     const serialized = JSON.stringify(context.messages);
-    const file = serialized.match(/<private_inquiry_result_file>\\\\"([^\\\\]+)\\\\"/)?.[1];
+    // The marker holds a JSON string inside serialized JSON; Windows paths contain backslashes.
+    const marker = serialized.match(/<private_inquiry_result_file>(.*?)<\\/private_inquiry_result_file>/)?.[1];
+    const file = marker === undefined ? undefined : JSON.parse(JSON.parse('"' + marker + '"'));
     const answered = serialized.includes('"role":"toolResult"');
     const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
     const base = { role: "assistant", provider: model.provider, api: model.api, model: model.id, timestamp: Date.now(), usage };

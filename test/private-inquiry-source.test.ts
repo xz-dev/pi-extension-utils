@@ -188,22 +188,3 @@ it("importing the subpath loads neither the private runtime nor the Pi SDK", asy
 	const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], { cwd: root, timeout: 60_000 });
 	expect(JSON.parse(stdout.trim().split("\n").pop()!)).toEqual([]);
 });
-
-it("private inquiry fails closed on an unsupported platform without forking", async () => {
-	const root = resolve(import.meta.dirname, "..");
-	const probe = [
-		"const { runPrivateInquiry } = await import(" + JSON.stringify(pathToFileURL(resolve(root, "src/private-inquiry.ts")).href) + ");",
-		"let forks = 0;",
-		"const runtime = { fork: async () => { forks++; throw new Error('must not fork'); }, dispose() {} };",
-		"const result = await runPrivateInquiry({ runtime, fork: {}, isCurrent: () => true, validate: () => ({ valid: true, value: 1 }), prompt: () => 'p', correction: () => 'c' });",
-		"console.log(JSON.stringify({ result, forks }));",
-	].join("\n");
-	const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], {
-		cwd: root,
-		timeout: 60_000,
-		env: { ...process.env, PIU_PRIVATE_INQUIRY_PLATFORM: "win32" },
-	});
-	const parsed = JSON.parse(stdout.trim().split("\n").pop()!);
-	expect(parsed.forks).toBe(0);
-	expect(parsed.result).toEqual({ kind: "execution-error", error: "pi-extension-utils/private-inquiry is supported on Linux and macOS only." });
-});

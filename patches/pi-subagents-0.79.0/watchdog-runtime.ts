@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import * as sdk from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -89,9 +89,13 @@ export function createWatchdogRuntime() {
 			let helpersAdmitted = 0;
 			const admittedHelpers = new Set<string>();
 			const writeResult = async (content: string) => {
-				const file = await open(resultFile, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+				// Windows has no O_NOFOLLOW: the opened descriptor must also match the link-free lstat identity.
+				const before = await lstat(resultFile, { bigint: true });
+				if (!before.isFile()) throw new Error("The decision result must be a regular file.");
+				const file = await open(resultFile, constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
 				try {
-					if (!(await file.stat()).isFile()) throw new Error("The decision result must be a regular file.");
+					const after = await file.stat({ bigint: true });
+					if (!after.isFile() || after.ino === 0n || after.dev !== before.dev || after.ino !== before.ino) throw new Error("The decision result must be a regular file.");
 					await file.truncate(0);
 					await file.writeFile(content, "utf8");
 				} finally {
