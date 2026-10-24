@@ -11,8 +11,8 @@
  *   zero-literal-change adoption.
  */
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { existsSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -141,6 +141,8 @@ function createFakeRuntime(
 		readonly inheritedAssistant?: boolean;
 		/** Runs inside child.dispose() before it completes (e.g. abort). */
 		readonly onDispose?: () => void;
+		/** Native session locator reported by the child (created by the test). */
+		readonly sessionFile?: string;
 	} = {},
 ) {
 	const dirs: string[] = [];
@@ -174,7 +176,7 @@ function createFakeRuntime(
 			const child: FakeChild = {
 				sessionId: `private-child-${children.length + 1}`,
 				modelId: "fake/local",
-				sessionFile: undefined,
+				sessionFile: options.sessionFile,
 				messages,
 				get attemptError() {
 					return state.attemptError;
@@ -823,4 +825,262 @@ test("agentDir exists before runtime.fork is invoked", async () => {
 	const result = await runPrivateDecision(baseOptions(runtime));
 	assert.equal(result.kind, "execution-error");
 	assert.equal(existedAtFork, true, "host created agentDir before fork");
+});
+
+// --- Final-failure session evidence (retain-failed-watchdog-sessions 1.1-1.3)
+
+/** Real native JSONL locator for evidence tests, created by the test itself. */
+async function sessionFixture(t: TestContext): Promise<{ dir: string; file: string }> {
+	const dir = await mkdtemp(join(TEST_TMP, "piu-session-"));
+	const file = join(dir, "child-session.jsonl");
+	await writeFile(file, '{"type":"session"}\n{"type":"message"}\n', "utf8");
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	return { dir, file };
+}
+
+test("a retained session JSONL survives child disposal on a terminal failure", async (t) => {
+	const { file } = await sessionFixture(t);
+	const { runtime, children } = createFakeRuntime(
+		t,
+		() => ({
+			throw: new Error("provider exploded"),
+			stopReason: "error",
+			errorMessage: "provider exploded",
+		}),
+		{ sessionFile: file },
+	);
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "execution-error");
+	assert.equal(children[0]!.aborted, true, "child settled before evidence check");
+	assert.deepEqual(result.session, {
+		kind: "available",
+		path: file,
+		sessionId: children[0]!.sessionId,
+	});
+	// The exact native file is intact and readable after cleanup.
+	assert.match(await readFile(file, "utf8"), /"type":"message"/);
+});
+
+test("exhausted corrections keep the same child's available session path", async (t) => {
+	const { file } = await sessionFixture(t);
+	const { runtime, children } = createFakeRuntime(
+		t,
+		() => ({ write: '{"action":"wait"}' }),
+		{ sessionFile: file },
+	);
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "decision-failed");
+	assert.equal(children[0]!.prompts.length, 3, "no extra request for evidence");
+	assert.deepEqual(result.session, {
+		kind: "available",
+		path: file,
+		sessionId: children[0]!.sessionId,
+	});
+});
+
+test("failed reconsideration evidence still identifies the same child", async (t) => {
+	const { file } = await sessionFixture(t);
+	const { runtime, children } = createFakeRuntime(
+		t,
+		({ responseIndex }) =>
+			responseIndex === 1 ? { write: VALID_UNLOCK } : { write: '{"action":"bogus"}' },
+		{ sessionFile: file },
+	);
+	const result = await runPrivateDecision(
+		baseOptions(runtime, { review: async () => "definite challenge" }),
+	);
+	assert.equal(result.kind, "decision-failed");
+	if (result.kind !== "decision-failed") return;
+	assert.equal(result.reconsidered, true);
+	assert.equal(children.length, 1, "initial + reconsideration share one child");
+	assert.deepEqual(result.session, {
+		kind: "available",
+		path: file,
+		sessionId: children[0]!.sessionId,
+	});
+});
+
+test("setup failure before any fork reports no session", async () => {
+	const runtime: WatchdogRuntime = {
+		async fork() {
+			throw new Error("no full-fork projection");
+		},
+		async dispose() {},
+	};
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "execution-error");
+	assert.deepEqual(result.session, { kind: "unavailable", reason: "no-session" });
+});
+
+test("a typed setup failure after fork creation preserves the real locator", async (t) => {
+	const { file } = await sessionFixture(t);
+	const { WatchdogForkSetupError } = await import(
+		"private-inquiry-subagents-runtime/watchdog-runtime"
+	);
+	const runtime: WatchdogRuntime = {
+		async fork() {
+			throw new WatchdogForkSetupError("child startup blew up", file);
+		},
+		async dispose() {},
+	};
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "execution-error");
+	assert.match((result as { error?: string }).error ?? "", /child startup blew up/);
+	assert.deepEqual(result.session, { kind: "available", path: file });
+});
+
+test("a missing session file is unavailable, never a claimed path", async (t) => {
+	const dir = await mkdtemp(join(TEST_TMP, "piu-session-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const gone = join(dir, "deleted.jsonl");
+	await writeFile(gone, "{}\n", "utf8");
+	const { runtime, children } = createFakeRuntime(
+		t,
+		async () => {
+			await rm(gone, { force: true });
+			return { write: '{"action":"wait"}' };
+		},
+		{ sessionFile: gone },
+	);
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "decision-failed");
+	assert.equal(children[0]!.prompts.length, 3);
+	assert.deepEqual(result.session, {
+		kind: "unavailable",
+		reason: "missing",
+		sessionId: children[0]!.sessionId,
+	});
+});
+
+test("a non-regular locator is unavailable, never advertised as saved", async (t) => {
+	const dir = await mkdtemp(join(TEST_TMP, "piu-session-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const { runtime } = createFakeRuntime(
+		t,
+		() => ({ throw: new Error("boom"), stopReason: "error" }),
+		{ sessionFile: dir },
+	);
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "execution-error");
+	assert.equal(result.session?.kind, "unavailable");
+	assert.equal(
+		result.session?.kind === "unavailable" ? result.session.reason : "",
+		"not-regular-file",
+	);
+});
+
+test("a relative locator is rejected as not absolute", async (t) => {
+	const { runtime } = createFakeRuntime(
+		t,
+		() => ({ throw: new Error("boom"), stopReason: "error" }),
+		{ sessionFile: "relative/child.jsonl" },
+	);
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "execution-error");
+	assert.equal(
+		result.session?.kind === "unavailable" ? result.session.reason : "",
+		"not-absolute",
+	);
+});
+
+test("cancellation reports evidence without changing the cancelled outcome", async (t) => {
+	const { file } = await sessionFixture(t);
+	let current = true;
+	const { runtime, children } = createFakeRuntime(
+		t,
+		() => {
+			current = false;
+			return { write: VALID_CONTINUE };
+		},
+		{ sessionFile: file },
+	);
+	const result = await runPrivateDecision(
+		baseOptions(runtime, { isCurrent: () => current }),
+	);
+	assert.equal(result.kind, "cancelled");
+	assert.equal(children[0]!.aborted, true);
+	assert.deepEqual(result.session, {
+		kind: "available",
+		path: file,
+		sessionId: children[0]!.sessionId,
+	});
+});
+
+test("a locator replaced by a symlink before verification is unavailable", async (t) => {
+	const dir = await mkdtemp(join(TEST_TMP, "piu-session-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const child = join(dir, "child.jsonl");
+	const parent = join(dir, "parent.jsonl");
+	await writeFile(child, '{"type":"session","name":"child"}\n', "utf8");
+	await writeFile(parent, '{"type":"session","name":"PARENT-SUBSTITUTE"}\n', "utf8");
+	const { runtime } = createFakeRuntime(
+		t,
+		() => ({ throw: new Error("boom"), stopReason: "error" }),
+		{
+			sessionFile: child,
+			// Substitute the real child locator with a symlink into the parent
+			// session during disposal, before the post-settlement check runs.
+			onDispose: () => {
+				if (!existsSync(child)) return; // idempotent across the extra t.after dispose
+				rmSync(child);
+				symlinkSync(parent, child);
+			},
+		},
+	);
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "execution-error", "original failure unchanged");
+	assert.equal(
+		result.session?.kind === "unavailable" ? result.session.reason : "",
+		"not-regular-file",
+		"symlink locator rejected, never followed into the parent",
+	);
+	if (result.session?.kind === "unavailable") {
+		assert.equal("path" in result.session, false, "no parent path advertised");
+	}
+});
+
+test("pre-fork directory failure reports explicit no-session evidence", async () => {
+	let forkCalls = 0;
+	const runtime: WatchdogRuntime = {
+		async fork() {
+			forkCalls++;
+			throw new Error("unreachable");
+		},
+		async dispose() {},
+	};
+	// runCore directly: the consumer-shaped wrapper pins its own naming.
+	const result = await runCore({
+		runtime,
+		fork: baseOptions(runtime).fork,
+		isCurrent: () => true,
+		naming: {
+			tag: "watchdog_result_file",
+			fileName: "decision.json",
+			dirPrefix: join(TEST_TMP, "piu-definitely-missing-parent", "nested-"),
+		},
+		validate: validateDecision,
+		prompt: () => "Submit the decision now.",
+		correction: (error) => `Invalid: ${error} Correct it.`,
+	});
+	assert.equal(result.kind, "execution-error");
+	assert.match((result as { error?: string }).error ?? "", /private decision directory/);
+	assert.equal(forkCalls, 0, "no fork attempted");
+	assert.deepEqual(result.session, { kind: "unavailable", reason: "no-session" });
+});
+
+test("evidence verification never spends an extra model request on success", async (t) => {
+	const { file } = await sessionFixture(t);
+	const { runtime, children } = createFakeRuntime(
+		t,
+		() => ({ write: VALID_CONTINUE }),
+		{ sessionFile: file },
+	);
+	const result = await runPrivateDecision(baseOptions(runtime));
+	assert.equal(result.kind, "decision");
+	assert.equal(children[0]!.prompts.length, 1);
+	assert.deepEqual(result.session, {
+		kind: "available",
+		path: file,
+		sessionId: children[0]!.sessionId,
+	});
 });

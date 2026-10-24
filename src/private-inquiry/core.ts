@@ -1,7 +1,15 @@
 import { type BigIntStats, constants } from "node:fs";
-import { type FileHandle, lstat, mkdir, mkdtemp, open, rm } from "node:fs/promises";
+import {
+	type FileHandle,
+	access,
+	lstat,
+	mkdir,
+	mkdtemp,
+	open,
+	rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import type {
 	WatchdogChildSession,
@@ -80,12 +88,38 @@ export interface PrivateDecisionObservation<T = unknown> {
 		| { readonly kind: "invalid"; readonly error: string };
 }
 
+/**
+ * Truthful availability of the exact child's native session JSONL after
+ * settlement. `available` carries the verified absolute path of a regular,
+ * readable file; `unavailable` gives a bounded host-side reason instead of
+ * an invented or unverified path. Retained evidence is diagnostic only —
+ * never an execution or result authority.
+ */
+export type PrivateSessionEvidence =
+	| {
+			readonly kind: "available";
+			/** Verified absolute path of the retained native session JSONL. */
+			readonly path: string;
+			readonly sessionId?: string;
+	  }
+	| {
+			readonly kind: "unavailable";
+			readonly reason:
+				| "no-session"
+				| "missing"
+				| "not-regular-file"
+				| "unreadable"
+				| "not-absolute";
+			readonly sessionId?: string;
+	  };
+
 /** Terminal result of one logical private inquiry. */
 export type PrivateDecisionResult<T = unknown> =
 	| {
 			readonly kind: "decision";
 			readonly decision: T;
 			readonly sessionId: string;
+			readonly session?: PrivateSessionEvidence;
 			/** True when the decision came from the reconsideration inquiry. */
 			readonly reconsidered: boolean;
 	  }
@@ -93,13 +127,19 @@ export type PrivateDecisionResult<T = unknown> =
 			readonly kind: "decision-failed";
 			readonly error: string;
 			readonly sessionId: string;
+			readonly session?: PrivateSessionEvidence;
 			readonly reconsidered: boolean;
 	  }
-	| { readonly kind: "cancelled"; readonly sessionId?: string }
+	| {
+			readonly kind: "cancelled";
+			readonly sessionId?: string;
+			readonly session?: PrivateSessionEvidence;
+	  }
 	| {
 			readonly kind: "execution-error";
 			readonly error: string;
 			readonly sessionId?: string;
+			readonly session?: PrivateSessionEvidence;
 	  };
 
 export interface PrivateDecisionOptions<T = unknown> {
@@ -356,15 +396,29 @@ export async function runPrivateDecision<T>(
 	try {
 		dir = await mkdtemp(options.naming?.dirPrefix ?? RESULT_DIR_PREFIX);
 	} catch (error) {
+		// No fork can exist yet: report explicit no-session evidence.
 		return {
 			kind: "execution-error",
 			error: `private decision directory: ${errorMessage(error)}`,
+			session: { kind: "unavailable", reason: "no-session" },
 		};
 	}
 	const agentDir = join(dir, "agent");
 	const resultFile = join(dir, options.naming?.fileName ?? RESULT_FILE_NAME);
 	let child: WatchdogChildSession | undefined;
 	let abortRequested = false;
+	// The exact fork locator, captured as soon as the runtime boundary knows
+	// it — from the returned child or a setup error thrown after the fork
+	// JSONL was created. Never inferred from sessionId or a naming guess.
+	let knownSessionFile: string | undefined;
+	let sessionCreated = false;
+
+	const captureSessionFile = (file: unknown): void => {
+		if (typeof file === "string" && file.length > 0) {
+			knownSessionFile = file;
+			sessionCreated = true;
+		}
+	};
 
 	const abortChild = async (): Promise<void> => {
 		if (child === undefined || abortRequested) return;
@@ -439,11 +493,21 @@ export async function runPrivateDecision<T>(
 				resultFile,
 			});
 		} catch (error) {
+			// A typed setup failure after fork creation carries the real
+			// locator (structural check keeps the runtime import type-only).
+			if (
+				typeof error === "object" &&
+				error !== null &&
+				(error as { name?: unknown }).name === "WatchdogForkSetupError"
+			) {
+				captureSessionFile((error as { sessionFile?: unknown }).sessionFile);
+			}
 			return {
 				kind: "execution-error",
 				error: `private fork: ${errorMessage(error)}`,
 			};
 		}
+		captureSessionFile(child.sessionFile);
 		const sessionId = child.sessionId;
 		const ownedChild = child;
 
@@ -655,5 +719,68 @@ export async function runPrivateDecision<T>(
 	) {
 		return { kind: "cancelled", sessionId: result.sessionId };
 	}
+	// Verify the known locator after settlement/disposal: only an absolute,
+	// regular, readable retained JSONL is advertised as available. Any
+	// verification failure degrades to a bounded unavailable reason and can
+	// never alter the terminal outcome.
+	result = {
+		...result,
+		session: await verifySessionEvidence(knownSessionFile, {
+			created: sessionCreated,
+			sessionId: result.sessionId,
+		}),
+	};
 	return result;
+}
+
+/**
+ * Post-settlement availability check for the exact child's native JSONL.
+ * Read-only lstat/access: never deletes, repairs or replaces evidence, and
+ * a filesystem failure downgrades to `unavailable` rather than throwing.
+ */
+async function verifySessionEvidence(
+	file: string | undefined,
+	context: { readonly created: boolean; readonly sessionId?: string },
+): Promise<PrivateSessionEvidence> {
+	const sessionId = context.sessionId;
+	if (file === undefined) {
+		return {
+			kind: "unavailable",
+			reason: context.created ? "unreadable" : "no-session",
+			...(sessionId === undefined ? {} : { sessionId }),
+		};
+	}
+	if (!isAbsolute(file)) {
+		return {
+			kind: "unavailable",
+			reason: "not-absolute",
+			...(sessionId === undefined ? {} : { sessionId }),
+		};
+	}
+	try {
+		// lstat: a symlink substituted for the child locator is rejected as
+		// non-regular instead of being followed into another session file.
+		if (!(await lstat(file)).isFile()) {
+			return {
+				kind: "unavailable",
+				reason: "not-regular-file",
+				...(sessionId === undefined ? {} : { sessionId }),
+			};
+		}
+		await access(file, constants.R_OK);
+	} catch (error) {
+		return {
+			kind: "unavailable",
+			reason:
+				(error as NodeJS.ErrnoException).code === "ENOENT"
+					? "missing"
+					: "unreadable",
+			...(sessionId === undefined ? {} : { sessionId }),
+		};
+	}
+	return {
+		kind: "available",
+		path: file,
+		...(sessionId === undefined ? {} : { sessionId }),
+	};
 }

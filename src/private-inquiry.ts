@@ -24,6 +24,7 @@ export {
 	type PrivateDecisionObservation as PrivateInquiryObservation,
 	type PrivateDecisionOptions as PrivateInquiryOptions,
 	type PrivateDecisionResult as PrivateInquiryResult,
+	type PrivateSessionEvidence,
 	type ResultFileNaming,
 } from "./private-inquiry/core.js";
 
@@ -34,6 +35,8 @@ export type {
 	WatchdogForkInput as PrivateForkInput,
 	WatchdogRuntime as PrivateRuntime,
 } from "private-inquiry-subagents-runtime/watchdog-runtime";
+
+export type { WatchdogForkSetupError } from "private-inquiry-subagents-runtime/watchdog-runtime";
 
 /**
  * Create one private runtime: the only call that loads the pinned private

@@ -67,25 +67,46 @@ export interface PrivateDecisionObservation<T = unknown> {
         readonly error: string;
     };
 }
+/**
+ * Truthful availability of the exact child's native session JSONL after
+ * settlement. `available` carries the verified absolute path of a regular,
+ * readable file; `unavailable` gives a bounded host-side reason instead of
+ * an invented or unverified path. Retained evidence is diagnostic only —
+ * never an execution or result authority.
+ */
+export type PrivateSessionEvidence = {
+    readonly kind: "available";
+    /** Verified absolute path of the retained native session JSONL. */
+    readonly path: string;
+    readonly sessionId?: string;
+} | {
+    readonly kind: "unavailable";
+    readonly reason: "no-session" | "missing" | "not-regular-file" | "unreadable" | "not-absolute";
+    readonly sessionId?: string;
+};
 /** Terminal result of one logical private inquiry. */
 export type PrivateDecisionResult<T = unknown> = {
     readonly kind: "decision";
     readonly decision: T;
     readonly sessionId: string;
+    readonly session?: PrivateSessionEvidence;
     /** True when the decision came from the reconsideration inquiry. */
     readonly reconsidered: boolean;
 } | {
     readonly kind: "decision-failed";
     readonly error: string;
     readonly sessionId: string;
+    readonly session?: PrivateSessionEvidence;
     readonly reconsidered: boolean;
 } | {
     readonly kind: "cancelled";
     readonly sessionId?: string;
+    readonly session?: PrivateSessionEvidence;
 } | {
     readonly kind: "execution-error";
     readonly error: string;
     readonly sessionId?: string;
+    readonly session?: PrivateSessionEvidence;
 };
 export interface PrivateDecisionOptions<T = unknown> {
     readonly runtime: WatchdogRuntime;

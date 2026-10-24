@@ -6,12 +6,12 @@ import { tmpdir } from "node:os";
  * private fork's own tools execute.
  */
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { ExtensionRunner, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 
 import {
 	captureAnchor,
@@ -36,7 +36,7 @@ interface Harness {
 	readonly runtime: PrivateRuntime;
 	readonly models: ModelRuntime;
 	readonly parent: SessionManager;
-	readonly requests: Array<{ readonly toolResults: string[] }>;
+	readonly requests: Array<{ readonly toolResults: string[]; readonly serialized: string }>;
 	readonly streamAborted: () => boolean;
 }
 
@@ -47,7 +47,7 @@ async function harness(t: TestContext, script: (request: number, resultFile: str
 	t.after(() => rm(cwd, { recursive: true, force: true }));
 	await writeFile(join(cwd, "notes.txt"), "the secret evidence token is AMBER-42\n");
 	const models = await ModelRuntime.create({ modelsPath: null });
-	const requests: Array<{ toolResults: string[] }> = [];
+	const requests: Array<{ toolResults: string[]; serialized: string }> = [];
 	let aborted = false;
 	let resultFile = "";
 	let callSeq = 0;
@@ -64,7 +64,7 @@ async function harness(t: TestContext, script: (request: number, resultFile: str
 			const toolResults = messages
 				.filter((message) => message.role === "toolResult")
 				.map((message) => JSON.stringify(message.content));
-			requests.push({ toolResults });
+			requests.push({ toolResults, serialized });
 			const step = script(requests.length, resultFile);
 			const base = { role: "assistant" as const, provider: model.provider, api: model.api, model: model.id, timestamp: Date.now(), usage };
 			const stream = createAssistantMessageEventStream();
@@ -139,6 +139,194 @@ test("evidence helpers execute in the child and do not consume terminal attempts
 	// The read and grep actually ran inside the private child.
 	assert.match(h.requests[1]!.toolResults.join("\n"), /AMBER-42/);
 	assert.match(h.requests[2]!.toolResults.join("\n"), /notes\.txt/);
+});
+
+test("a failed inquiry retains the real fork JSONL at its advertised path", { timeout: 60_000 }, async (t) => {
+	// Three provider replies never write the result file: the correction
+	// allowance is exhausted and the logical inquiry ends decision-failed.
+	const h = await harness(t, () => ({ text: "I refuse to write." }));
+	const result = await inquire(h, EVIDENCE);
+	assert.equal(result.kind, "decision-failed", JSON.stringify(result));
+	assert.equal(h.requests.length, 3, "three consumed responses, none extra");
+	const session = result.session;
+	assert.equal(session?.kind, "available", JSON.stringify(result.session));
+	if (session?.kind !== "available") return;
+	assert.equal(isAbsolute(session.path), true, "full copyable absolute path");
+	assert.match(session.path, /forks\//, "real native fork location, not the temp result dir");
+	// Settlement and disposal already happened: the file is still there,
+	// regular, readable, and holds the failed child's own persisted history.
+	assert.equal((await stat(session.path)).isFile(), true);
+	await access(session.path);
+	const persisted = await readFile(session.path, "utf8");
+	assert.match(persisted, /I refuse to write\./, "own replies persisted");
+	assert.match(persisted, /private_inquiry_result_file/, "inquiry prompt persisted");
+});
+
+test("setup failure after fork creation preserves the real session locator", { timeout: 60_000 }, async (t) => {
+	// A parent with no inheritable system state fails inside fork() AFTER the
+	// native fork JSONL already exists: the typed error must carry that file.
+	const { WatchdogForkSetupError } = await import("private-inquiry-subagents-runtime/watchdog-runtime");
+	const h = await harness(t, () => ({ text: "unused" }));
+	const bareParent = SessionManager.create(h.cwd, join(h.cwd, "sessions2"));
+	bareParent.appendMessage({ role: "user", content: "no system state", timestamp: Date.now() } as never);
+	try {
+		await h.runtime.fork({
+			parent: bareParent,
+			parentProviderRegistry: h.models,
+			cwd: h.cwd,
+			agentDir: await mkdtemp(join(TEST_TMP, "piu-evidence-agent-")),
+			resultFile: join(await mkdtemp(join(TEST_TMP, "piu-evidence-result-")), "result.json"),
+			model: "piu-test/local",
+			retryPolicy: "native",
+			anchorId: captureAnchor(bareParent),
+		});
+		assert.fail("fork should fail without inheritable system state");
+	} catch (error) {
+		assert.ok(error instanceof WatchdogForkSetupError, `expected typed setup error, got ${error}`);
+		const file = (error as InstanceType<typeof WatchdogForkSetupError>).sessionFile;
+		assert.equal(isAbsolute(file), true);
+		assert.match(file, /forks\//);
+		assert.equal((await stat(file)).isFile(), true, "the retained fork JSONL exists");
+		assert.match(await readFile(file, "utf8"), /no system state/, "fork persisted parent history");
+		// And the shared core surfaces that same locator as available evidence.
+		const result = await runPrivateInquiry<string>({
+			runtime: {
+				fork: () => Promise.reject(error),
+				dispose: () => {},
+			},
+			fork: {
+				parent: h.parent,
+				parentProviderRegistry: h.models,
+				cwd: h.cwd,
+				model: "piu-test/local",
+				retryPolicy: "native",
+			},
+			isCurrent: () => true,
+			validate: () => ({ valid: false, error: "unused" }),
+			prompt: () => "unused",
+			correction: () => "unused",
+		});
+		assert.equal(result.kind, "execution-error");
+		assert.deepEqual(result.session, { kind: "available", path: file });
+	}
+});
+
+test("context_with_system hook applies the fork projection without extension errors", { timeout: 60_000 }, async (t) => {
+	// The SDK swallows hook errors and continues with untransformed messages;
+	// capture ExtensionRunner.emitError so a swallowed context_with_system
+	// fault cannot produce a false green.
+	const emitted: Array<{ event?: unknown; error?: unknown }> = [];
+	const originalEmit = ExtensionRunner.prototype.emitError;
+	ExtensionRunner.prototype.emitError = function (error) {
+		emitted.push(error as { event?: unknown; error?: unknown });
+		return originalEmit.call(this, error);
+	};
+	t.after(() => {
+		ExtensionRunner.prototype.emitError = originalEmit;
+	});
+	const h = await harness(t, (n, file) => (n === 1 ? write(file, "projected") : { text: "unexpected" }));
+	let result;
+	try {
+		result = await inquire(h, EVIDENCE);
+	} finally {
+		ExtensionRunner.prototype.emitError = originalEmit;
+	}
+	assert.equal(result!.kind, "decision", JSON.stringify(result));
+	assert.equal(result!.kind === "decision" && result!.decision, "projected");
+	assert.equal(h.requests.length, 1);
+	const hookErrors = emitted.filter(
+		(e) => e.event === "context_with_system" || String(e.error ?? "").includes("forkedAt"),
+	);
+	assert.deepEqual(hookErrors, [], `swallowed context hook errors: ${JSON.stringify(emitted)}`);
+	// The fork projection actually ran: inherited parent system state is in
+	// the outgoing request, while the child's own generated preamble/rules
+	// are not leaked into the provider request.
+	const sent = h.requests[0]!.serialized;
+	assert.match(sent, /Parent instructions/, "inherited parent system state projected");
+	assert.match(sent, /Parent task/, "inherited conversation projected");
+	// projectForkRequest ran: the request carries the parent's system prefix
+	// plus the folded subagent_instructions block, not the child's own
+	// generated preamble/rules/docs sections as top-level system entries.
+	assert.match(sent, /subagent_instructions/, "fork projection applied");
+	assert.doesNotMatch(sent, /"preamble":/, "no child-generated system prompt sections");
+});
+
+test("a post-create resolver failure keeps the real restored fork locator", { timeout: 60_000 }, async (t) => {
+	// Fault window: native createBranchedSession() returned, then the
+	// resolver's post-create inspection throws before prepare completes.
+	// Simulated through SessionManager.open: after the real fork is created
+	// the file is moved aside (existsSync fails → fallback path), and the
+	// first fallback getHeader() restores it and throws the injected EIO.
+	const fs = await import("node:fs");
+	const originalOpen = SessionManager.open;
+	let injected = 0;
+	SessionManager.open = function (this: unknown, ...args: unknown[]) {
+		const manager = Reflect.apply(originalOpen, this, args) as SessionManager;
+		const create = manager.createBranchedSession.bind(manager);
+		const realGetHeader = manager.getHeader?.bind(manager);
+		let state: { file: string; backup: string } | undefined;
+		return Object.assign(manager, {
+			createBranchedSession: (leafId: string) => {
+				const file = create(leafId);
+				if (file !== undefined && injected === 0) {
+					injected++;
+					const backup = `${file}.eio-backup`;
+					fs.renameSync(file, backup);
+					state = { file, backup };
+				}
+				return file;
+			},
+			getHeader: () => {
+				if (state !== undefined) {
+					// Restore the real fork content, then fail the inspection.
+					fs.renameSync(state.backup, state.file);
+					state = undefined;
+					const error = new Error("INJECTED_FORK_READ_EIO") as NodeJS.ErrnoException;
+					error.code = "EIO";
+					throw error;
+				}
+				return realGetHeader?.();
+			},
+		});
+	} as typeof SessionManager.open;
+	t.after(() => {
+		SessionManager.open = originalOpen;
+	});
+	const h = await harness(t, () => ({ text: "unused" }));
+	let result;
+	try {
+		result = await inquire(h, EVIDENCE);
+	} finally {
+		SessionManager.open = originalOpen;
+	}
+	assert.equal(injected, 1, "the injected post-create fault actually fired");
+	assert.equal(result!.kind, "execution-error", JSON.stringify(result));
+	assert.match(
+		result!.kind === "execution-error" ? result!.error : "",
+		/INJECTED_FORK_READ_EIO/,
+		"original setup failure preserved",
+	);
+	assert.equal(h.requests.length, 0, "zero provider requests or extra forks");
+	// The known locator — captured at createBranchedSession — survives the
+	// prepare-stage failure; after the transient fault the real readable fork
+	// is advertised, not "no-session" and not the parent.
+	assert.equal(result!.session?.kind, "available", JSON.stringify(result!.session));
+	if (result!.session?.kind === "available") {
+		assert.match(result!.session.path, /forks\//);
+		assert.equal((await stat(result!.session.path)).isFile(), true);
+		assert.match(await readFile(result!.session.path, "utf8"), /Parent task/);
+		assert.doesNotMatch(result!.session.path, /parent\.jsonl/);
+	}
+});
+
+test("a successful inquiry advertises its available session too", { timeout: 60_000 }, async (t) => {
+	const h = await harness(t, (n, file) => (n === 1 ? write(file, "kept") : { text: "unexpected" }));
+	const result = await inquire(h, EVIDENCE);
+	assert.equal(result.kind, "decision", JSON.stringify(result));
+	assert.equal(result.session?.kind, "available");
+	if (result.session?.kind === "available") {
+		await access(result.session.path);
+	}
 });
 
 test("write-only profile rejects helpers before any effect", { timeout: 60_000 }, async (t) => {

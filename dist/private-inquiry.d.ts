@@ -12,8 +12,9 @@
  * `createPrivateRuntime()`, so importing this subpath never initializes Pi.
  */
 import type { WatchdogRuntime } from "private-inquiry-subagents-runtime/watchdog-runtime";
-export { INVALID_ATTEMPT_LIMIT, RESULT_DIR_PREFIX, RESULT_FILE_NAME, RESULT_FILE_TAG, runPrivateDecision as runPrivateInquiry, type PayloadValidation, type PrivateDecisionObservation as PrivateInquiryObservation, type PrivateDecisionOptions as PrivateInquiryOptions, type PrivateDecisionResult as PrivateInquiryResult, type ResultFileNaming, } from "./private-inquiry/core.js";
+export { INVALID_ATTEMPT_LIMIT, RESULT_DIR_PREFIX, RESULT_FILE_NAME, RESULT_FILE_TAG, runPrivateDecision as runPrivateInquiry, type PayloadValidation, type PrivateDecisionObservation as PrivateInquiryObservation, type PrivateDecisionOptions as PrivateInquiryOptions, type PrivateDecisionResult as PrivateInquiryResult, type PrivateSessionEvidence, type ResultFileNaming, } from "./private-inquiry/core.js";
 export type { ChildRetryPolicy as RetryPolicy, WatchdogChildSession as PrivateChildSession, WatchdogExecutionProfile as ExecutionProfile, WatchdogForkInput as PrivateForkInput, WatchdogRuntime as PrivateRuntime, } from "private-inquiry-subagents-runtime/watchdog-runtime";
+export type { WatchdogForkSetupError } from "private-inquiry-subagents-runtime/watchdog-runtime";
 /**
  * Create one private runtime: the only call that loads the pinned private
  * pi-subagents entry (and therefore Pi). Dispose it when the owner unloads.

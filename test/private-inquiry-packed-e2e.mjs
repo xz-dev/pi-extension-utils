@@ -129,7 +129,9 @@ try {
 	assert.equal(parsed.result.kind, "decision", JSON.stringify(parsed));
 	assert.equal(parsed.result.decision, "forty-two");
 	assert.equal(parsed.requests, 1, "file-only result: no post-write acknowledgement request");
-	console.log(JSON.stringify({ ok: true, packed: JSON.parse(stdout)[0].filename, result: parsed.result.kind, requests: parsed.requests }));
+	assert.equal(parsed.result.session?.kind, "available", "additive session evidence metadata");
+	assert.match(parsed.result.session?.path ?? "", /forks\//, "real native fork locator");
+	console.log(JSON.stringify({ ok: true, packed: JSON.parse(stdout)[0].filename, result: parsed.result.kind, session: parsed.result.session.kind, requests: parsed.requests }));
 } finally {
 	await rm(root, { recursive: true, force: true });
 }

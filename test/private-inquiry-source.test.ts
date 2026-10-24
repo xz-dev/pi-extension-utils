@@ -188,3 +188,4 @@ it("importing the subpath loads neither the private runtime nor the Pi SDK", asy
 	const { stdout } = await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], { cwd: root, timeout: 60_000 });
 	expect(JSON.parse(stdout.trim().split("\n").pop()!)).toEqual([]);
 });
+

@@ -6,6 +6,16 @@ import type {
 
 export type ChildRetryPolicy = "disabled" | "native";
 
+/**
+ * Setup failure thrown after the native fork JSONL already exists. Carries
+ * the exact locator so hosts can retain it as failure evidence instead of
+ * dropping it with the generic error.
+ */
+export declare class WatchdogForkSetupError extends Error {
+	constructor(message: string, sessionFile: string, options?: { cause?: unknown });
+	readonly sessionFile: string;
+}
+
 export interface WatchdogForkInput {
 	parent: ReadonlySessionManager;
 	parentProviderRegistry: Pick<ModelRuntime, "getRegisteredProviderIds" | "getRegisteredProviderConfig" | "getRegisteredNativeProvider">;

@@ -21,6 +21,22 @@ import {
 	systemMessagesBefore,
 } from "../runs/shared/subagent-prompt-runtime.ts";
 
+/**
+ * Setup failure thrown after the native fork JSONL already exists. Carries
+ * the exact locator so hosts can retain it as failure evidence instead of
+ * dropping it with the generic error.
+ */
+export class WatchdogForkSetupError extends Error {
+	constructor(
+		message: string,
+		readonly sessionFile: string,
+		options?: { cause?: unknown },
+	) {
+		super(message, options);
+		this.name = "WatchdogForkSetupError";
+	}
+}
+
 export interface WatchdogForkInput {
 	parent: sdk.ReadonlySessionManager;
 	parentProviderRegistry: ParentProviderRegistry;
@@ -54,6 +70,10 @@ export function createWatchdogRuntime() {
 	return {
 		async fork(input: WatchdogForkInput): Promise<ChildSession> {
 			if (input.signal?.aborted) throw input.signal.reason;
+			// The exact fork locator is captured at the createBranchedSession
+			// boundary — before the resolver reads/sanitizes the file — so ANY
+			// later setup failure can still carry the real retained JSONL path.
+			let forkSessionFile: string | undefined;
 			const resolver = createForkContextResolver(
 				{
 					getSessionFile: () => input.parent.getSessionFile(),
@@ -62,21 +82,58 @@ export function createWatchdogRuntime() {
 				"fork",
 				{
 					runDirName: randomUUID,
-					openSession: (file, dir) => sdk.SessionManager.open(file, dir, input.cwd),
+					openSession: (file, dir) => {
+						const manager = sdk.SessionManager.open(file, dir, input.cwd);
+						return {
+							createBranchedSession: (leafId: string) => {
+								const created = manager.createBranchedSession(leafId);
+								if (created) forkSessionFile = created;
+								return created;
+							},
+							getHeader: () => manager.getHeader?.(),
+							getEntries: () => manager.getEntries?.(),
+						};
+					},
 				},
 			);
-			await resolver.prepareSessionForIndex();
-			const sessionFile = resolver.sessionFileForIndex();
+			const fail = (message: string, cause?: unknown): never => {
+				if (forkSessionFile !== undefined) {
+					throw new WatchdogForkSetupError(message, forkSessionFile, { cause });
+				}
+				throw cause instanceof Error ? cause : new Error(message);
+			};
+			try {
+				await resolver.prepareSessionForIndex();
+			} catch (error) {
+				fail(error instanceof Error ? error.message : String(error), error);
+			}
+			let sessionFile: string | undefined;
+			try {
+				sessionFile = resolver.sessionFileForIndex();
+			} catch (error) {
+				fail(error instanceof Error ? error.message : String(error), error);
+			}
 			if (!sessionFile) throw new Error("The private inquiry requires a full fork.");
-			const manager = sdk.SessionManager.open(sessionFile, undefined, input.cwd);
-			const forkedAt = Date.parse(manager.getHeader()?.timestamp ?? "");
-			if (!Number.isFinite(forkedAt)) throw new Error("Invalid private fork timestamp.");
-			const messages = manager.buildSessionProjection().messages;
+			let manager: sdk.SessionManager;
+			try {
+				manager = sdk.SessionManager.open(sessionFile, undefined, input.cwd);
+			} catch (error) {
+				fail(`Invalid private fork session: ${error instanceof Error ? error.message : String(error)}`, error);
+			}
+			let forkedAt: number;
+			let messages;
+			try {
+				forkedAt = Date.parse(manager!.getHeader()?.timestamp ?? "");
+				if (!Number.isFinite(forkedAt)) throw new Error("Invalid private fork timestamp.");
+				messages = manager!.buildSessionProjection().messages;
+			} catch (error) {
+				fail(error instanceof Error ? error.message : String(error), error);
+			}
 			// This frozen projection predates child creation; a compaction checkpoint
 			// can share the fork's millisecond and still belongs to the parent.
-			const inherited = systemMessagesBefore(messages, Number.POSITIVE_INFINITY);
-			if (inherited.length === 0) throw new Error("The parent has no inheritable system state.");
-			const parentModel = modelBefore(messages, Number.POSITIVE_INFINITY);
+			const inherited = systemMessagesBefore(messages!, Number.POSITIVE_INFINITY);
+			if (inherited.length === 0) fail("The parent has no inheritable system state.");
+			const parentModel = modelBefore(messages!, Number.POSITIVE_INFINITY);
 			const cacheKey = deriveForkPromptCacheKey(input.parent.getSessionId());
 			const resultFile = resolve(input.resultFile);
 			let active = false;
@@ -183,32 +240,40 @@ export function createWatchdogRuntime() {
 						rewriteForkCacheProviderRequest(event, ctx, cacheKey));
 				},
 			};
-			const child = await factory.create({
-				cwd: input.cwd,
-				agentDir: input.agentDir,
-				projectTrusted: false,
-				parentProviderRegistry: input.parentProviderRegistry,
-				parentSessionFile: input.parent.getSessionFile(),
-				storage: { kind: "file", sessionFile },
-				model: input.model,
-				autoRetryPolicy: input.retryPolicy,
-				signal: input.signal,
-				tools: evidence ? ["write", ...EVIDENCE_TOOLS] : ["write"],
-				extensionPaths: [],
-				ambientExtensions: false,
-				hooks: [singleResponse, projection],
-				noSkills: true,
-				noContextFiles: true,
-				systemPrompt: "",
-				runtime: {
+			let child: ChildSession;
+			try {
+				child = await factory.create({
 					cwd: input.cwd,
-					fanoutChild: false,
-					depth: 1,
-					maxDepth: 1,
-					waitTool: { enabled: false },
-					fast: false,
-				},
-			});
+					agentDir: input.agentDir,
+					projectTrusted: false,
+					parentProviderRegistry: input.parentProviderRegistry,
+					parentSessionFile: input.parent.getSessionFile(),
+					storage: { kind: "file", sessionFile },
+					model: input.model,
+					autoRetryPolicy: input.retryPolicy,
+					signal: input.signal,
+					tools: evidence ? ["write", ...EVIDENCE_TOOLS] : ["write"],
+					extensionPaths: [],
+					ambientExtensions: false,
+					hooks: [singleResponse, projection],
+					noSkills: true,
+					noContextFiles: true,
+					systemPrompt: "",
+					runtime: {
+						cwd: input.cwd,
+						fanoutChild: false,
+						depth: 1,
+						maxDepth: 1,
+						waitTool: { enabled: false },
+						fast: false,
+					},
+				});
+			} catch (error) {
+				// Child startup failed after the fork JSONL was created: retain
+				// the known locator on the typed error for failure evidence.
+				if (error instanceof WatchdogForkSetupError) throw error;
+				fail(`Private child startup: ${error instanceof Error ? error.message : String(error)}`, error);
+			}
 			const prompt = child.prompt;
 			child.prompt = async (text) => {
 				if (active) throw new Error("A private decision response is already running.");
