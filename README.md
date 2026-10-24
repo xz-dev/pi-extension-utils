@@ -127,6 +127,8 @@ pi.on("agent_settled", async (_event, ctx) => {
 - `retryPolicy`: `"disabled"` or `"native"` Pi provider retry for the child;
 - aborting `signal` aborts the exact child immediately, including an in-flight provider stream or helper subprocess; `isCurrent()` is the checkpoint backstop, checked at every awaited boundary and before the result commits. A late result never commits, and the parent session and other runs are never aborted. Consumers abort `signal` as soon as they observe a revocation event.
 
+Terminal decision/failure results carry additive `session` evidence (a late-cancelled result may return without it): `{ kind: "available", path }` is the exact child's native fork JSONL, verified as an absolute regular readable file after child settlement (the file lives under `<parent-session-name>/forks/<run-id>/`, outside the owned result directory that is always removed); `{ kind: "unavailable", reason }` reports `no-session`, `missing`, `not-regular-file`, `unreadable` or `not-absolute` — never an invented or unverified path. A `WatchdogForkSetupError` thrown by the runtime after the fork file exists still carries its real `sessionFile` locator. Retained sessions are local diagnostic evidence only: no upload, no replay, no restored authority.
+
 ```ts
 import { captureAnchor, runPrivateInquiry } from "pi-extension-utils/private-inquiry";
 
