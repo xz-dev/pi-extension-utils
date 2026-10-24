@@ -152,7 +152,7 @@ test("a failed inquiry retains the real fork JSONL at its advertised path", { ti
 	assert.equal(session?.kind, "available", JSON.stringify(result.session));
 	if (session?.kind !== "available") return;
 	assert.equal(isAbsolute(session.path), true, "full copyable absolute path");
-	assert.match(session.path, /forks\//, "real native fork location, not the temp result dir");
+	assert.match(session.path, /[\\/]forks[\\/]/, "real native fork location, not the temp result dir");
 	// Settlement and disposal already happened: the file is still there,
 	// regular, readable, and holds the failed child's own persisted history.
 	assert.equal((await stat(session.path)).isFile(), true);
@@ -185,7 +185,7 @@ test("setup failure after fork creation preserves the real session locator", { t
 		assert.ok(error instanceof WatchdogForkSetupError, `expected typed setup error, got ${error}`);
 		const file = (error as InstanceType<typeof WatchdogForkSetupError>).sessionFile;
 		assert.equal(isAbsolute(file), true);
-		assert.match(file, /forks\//);
+		assert.match(file, /[\\/]forks[\\/]/);
 		assert.equal((await stat(file)).isFile(), true, "the retained fork JSONL exists");
 		assert.match(await readFile(file, "utf8"), /no system state/, "fork persisted parent history");
 		// And the shared core surfaces that same locator as available evidence.
@@ -312,7 +312,7 @@ test("a post-create resolver failure keeps the real restored fork locator", { ti
 	// is advertised, not "no-session" and not the parent.
 	assert.equal(result!.session?.kind, "available", JSON.stringify(result!.session));
 	if (result!.session?.kind === "available") {
-		assert.match(result!.session.path, /forks\//);
+		assert.match(result!.session.path, /[\\/]forks[\\/]/);
 		assert.equal((await stat(result!.session.path)).isFile(), true);
 		assert.match(await readFile(result!.session.path, "utf8"), /Parent task/);
 		assert.doesNotMatch(result!.session.path, /parent\.jsonl/);
