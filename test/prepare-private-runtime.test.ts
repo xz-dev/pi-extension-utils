@@ -20,7 +20,7 @@ async function runScript(cwd: string) {
 
 it("prepare-private-runtime patches the pinned runtime with the retry seam", async () => {
 	const out = await runScript(root);
-	expect(out.stderr).toMatch( /Prepared private pi-subagents 0.79.0 \(1008e5993e90fcf13b815c97c15a0c54f7f6f116\)/);
+	expect(out.stderr).toMatch( /Prepared private pi-subagents 0.83.1 \(312082429bda07714fe0fe7729fe8d4935de4c5a\)/);
 	// Entry loads through tsx from this package's node_modules.
 	const check = await execFileAsync(process.execPath, [
 		"--import",

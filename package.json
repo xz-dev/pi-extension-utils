@@ -76,21 +76,24 @@
     "test:core": "node --import tsx --test --test-concurrency=1 test/private-inquiry-core.node-test.ts test/private-inquiry-evidence.node-test.ts"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "1.3.0",
-    "@earendil-works/pi-ai": "1.3.0",
-    "@earendil-works/pi-coding-agent": "1.3.0",
-    "@eslint/js": "^9.39.1",
-    "@types/node": "^24.10.1",
-    "eslint": "^9.39.1",
-    "globals": "^16.5.0",
-    "tsx": "^4.23.13",
-    "typebox": "1.3.7",
-    "typescript": "~5.9.2",
-    "typescript-eslint": "^8.57.0",
-    "vitest": "^4.1.0"
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.5",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
+    "tsx": "^4.23.15",
+    "typebox": "1.4.3",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vitest": "^5.0.5"
   },
   "dependencies": {
-    "private-inquiry-subagents-runtime": "git+https://github.com/nicobailon/pi-subagents.git#1008e5993e90fcf13b815c97c15a0c54f7f6f116"
+    "private-inquiry-subagents-runtime": "git+https://github.com/nicobailon/pi-subagents.git#312082429bda07714fe0fe7729fe8d4935de4c5a"
+  },
+  "overrides": {
+    "undici": "8.12.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=1.3.0"

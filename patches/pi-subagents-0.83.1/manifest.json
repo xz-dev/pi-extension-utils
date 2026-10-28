@@ -1,9 +1,9 @@
 {
-  "version": "0.79.0",
-  "commit": "1008e5993e90fcf13b815c97c15a0c54f7f6f116",
+  "version": "0.83.1",
+  "commit": "312082429bda07714fe0fe7729fe8d4935de4c5a",
   "sources": {
     "src/runs/shared/child-session.ts": {
-      "sha256": "e8b47992f6e77351cef82516fd68eec96f7093803848973e42c9fa5f1f9220ef",
+      "sha256": "4ca5f7f5488787493b8767d4fe7c8f1a84d091287749fe47fd991c3611b35f8b",
       "replacements": [
         {
           "from": "export interface ChildSessionLaunch {\n\tcwd: string;",
@@ -24,7 +24,7 @@
       ]
     },
     "src/runs/shared/subagent-prompt-runtime.ts": {
-      "sha256": "3752489a6176a985a01320060fffead426ddb8f2565d4e78e781928b7651661f"
+      "sha256": "778730cbed14ee7f1c929f92f6f6524fd98218ef4f2b1732820fa21b8173d9d9"
     },
     "src/shared/fork-context.ts": {
       "sha256": "65e2bf06e569f3dde47a57224a4af8e8c81de41e8267c0935964e8fda08777ed"

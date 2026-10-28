@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const root = process.env.PIU_PRIVATE_RUNTIME_ROOT ?? packageRoot;
-const patch = join(packageRoot, "patches/pi-subagents-0.79.0");
+const patch = join(packageRoot, "patches/pi-subagents-0.83.1");
 
 // Node resolution order from this package: its own node_modules, then each
 // ancestor's (npm hoists a tarball/Git install's dependency next to us).
