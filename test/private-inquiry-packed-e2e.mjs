@@ -1,5 +1,5 @@
-// Packed production-only install of pi-extension-utils, then a real stock
-// Pi 1.3.0 host creates a full private fork through `pi-extension-utils/
+// Packed production-only install of pi-extension-utils, then a stock Pi host
+// selected by the manifest creates a full private fork through `pi-extension-utils/
 // private-inquiry` and receives one file-only result. No developer checkout
 // import, no public pi-subagents, no bundled duplicate SDK.
 import assert from "node:assert/strict";

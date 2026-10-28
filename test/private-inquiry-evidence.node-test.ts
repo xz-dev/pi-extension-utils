@@ -1,6 +1,6 @@
 import { tmpdir } from "node:os";
 /**
- * Real stock Pi 1.3.0 conformance for the read-only evidence profile and
+ * Manifest-selected stock Pi conformance for the read-only evidence profile and
  * immediate cancellation, through the prepared private runtime and the moved
  * core. A stateful synthetic provider scripts each child request; only the
  * private fork's own tools execute.
